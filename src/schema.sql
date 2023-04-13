@@ -1,6 +1,14 @@
+create table name (
+    id integer primary key,
+    text text not null
+);
+
 create table class (
     id integer primary key,
-    name text not null unique
+    serial integer unique,
+    stack_trace_serial integer unique,
+    name_id not null,
+    foreign key(name_id) references name(id)
 );
 
 create table instance (
