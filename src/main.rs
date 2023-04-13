@@ -8,7 +8,7 @@ fn main() -> Result<()> {
     let path = args[1].as_str();
     let db_path = args[2].as_str();
     println!("Read: {path}");
-    println!("Write: {path}");
+    println!("Write: {db_path}");
     let mut conn = Connection::open(db_path)?;
     build_schema(&conn)?;
     parse_records(fs::File::open(path)?, &mut conn)?;

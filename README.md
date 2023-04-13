@@ -25,3 +25,16 @@ select
 from class_instance
 ;
 ```
+
+Find dupes in `load_class`:
+
+```sql
+with dupe as (
+    select obj_id, name_id, count(*) from load_class
+    group by obj_id having count(*) > 1
+)
+select * from class
+    inner join dupe on class.obj_id = dupe.obj_id
+    inner join name on dupe.name_id = name.name_id
+;
+```
