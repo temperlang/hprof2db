@@ -1,4 +1,5 @@
 use anyhow::Result;
+use indoc::indoc;
 use jvm_hprof::{heap_dump::SubRecord, parse_hprof, HeapDumpSegment, RecordTag};
 use rusqlite::Connection;
 use std::{env, fs};
@@ -6,8 +7,10 @@ use std::{env, fs};
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     let path = args[1].as_str();
-    println!("Reading: {path}");
-    let conn = Connection::open_in_memory()?;
+    let db_path = args[2].as_str();
+    println!("Read: {path}");
+    println!("Write: {path}");
+    let conn = Connection::open(db_path)?;
     build_schema(&conn)?;
     parse_records(fs::File::open(path)?);
     Ok(())
@@ -15,12 +18,16 @@ fn main() -> Result<()> {
 
 fn build_schema(conn: &Connection) -> Result<()> {
     conn.execute(
-        "
+        indoc! {"
+        create table class (
+            id integer primary key,
+            name text not null
+        );
         create table instance (
             id integer primary key,
             class_id integer
-        )
-        ",
+        );
+        "},
         (),
     )?;
     Ok(())
