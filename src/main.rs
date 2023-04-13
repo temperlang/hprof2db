@@ -9,9 +9,9 @@ fn main() -> Result<()> {
     let db_path = args[2].as_str();
     println!("Read: {path}");
     println!("Write: {path}");
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
     build_schema(&conn)?;
-    parse_records(fs::File::open(path)?, &conn)?;
+    parse_records(fs::File::open(path)?, &mut conn)?;
     Ok(())
 }
 
@@ -20,12 +20,15 @@ fn build_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn parse_records(file: fs::File, conn: &Connection) -> Result<()> {
+fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
+    let tx = conn.transaction()?;
     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
     let hprof = parse_hprof(&memmap[..]).unwrap();
     let mut record_count = 0;
     let mut dump_count = 0;
     let mut instance_count = 0;
+    let mut class_count = 0;
+    let mut name_count = 0;
     for record in hprof.records_iter() {
         let record = record.unwrap();
         record_count += 1;
@@ -36,29 +39,34 @@ fn parse_records(file: fs::File, conn: &Connection) -> Result<()> {
                     parse_dump_records(&record.as_heap_dump_segment().unwrap().unwrap())
             }
             RecordTag::LoadClass => {
+                class_count += 1;
                 let class = record.as_load_class().unwrap().unwrap();
-                conn.execute(
-                    "insert into class (id, serial, stack_trace_serial, name_id) values (?1, ?2, ?3, ?4)",
+                tx.execute(
+                    "insert into class(serial, obj_id, stack_trace_serial, name_id) values(?1, ?2, ?3, ?4)",
                     params![
-                        class.class_obj_id().id(),
                         class.class_serial().num(),
+                        class.class_obj_id().id(),
                         class.stack_trace_serial().num(),
                         class.class_name_id().id(),
                     ],
                 )?;
             }
             RecordTag::Utf8 => {
+                name_count += 1;
                 let name = record.as_utf_8().unwrap().unwrap();
-                conn.execute(
-                    "insert into name (id, text) values (?1, ?2)",
+                tx.execute(
+                    "insert into name(name_id, text) values(?1, ?2)",
                     params![name.name_id().id(), name.text(),],
                 )?;
             }
             _ => {}
         }
     }
+    tx.commit()?;
     println!("Records: {record_count}");
+    println!("Classes: {class_count}");
     println!("Dumps: {dump_count}");
+    println!("Names: {name_count}");
     println!("Instances: {instance_count}");
     Ok(())
 }
