@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 jvm-hprof = "0.1.0"
 memmap = "0.7.0"
+rusqlite = "0.29.0"
