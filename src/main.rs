@@ -15,11 +15,14 @@ fn main() -> Result<()> {
     let mut conn = Connection::open(db_path)?;
     build_schema(&conn)?;
     parse_records(fs::File::open(path)?, &mut conn)?;
+    println!("Index"); // faster after insert
+    conn.execute_batch(include_str!("index.sql"))?;
     Ok(())
 }
 
 fn build_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(include_str!("schema.sql"))?;
+    conn.execute_batch("pragma synchronous = off")?; // maybe faster
     Ok(())
 }
 
