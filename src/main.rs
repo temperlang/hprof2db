@@ -64,7 +64,7 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
         insert_load_class: tx.prepare("insert into load_class(serial, obj_id, stack_trace_serial, name_id) values(?1, ?2, ?3, ?4)")?,
         insert_name: tx.prepare("insert into name(name_id, text) values(?1, ?2)")?,
         insert_obj_array: tx.prepare("insert into obj_array(obj_id, stack_trace_serial, class_obj_id, length) values(?1, ?2, ?3, ?4)")?,
-        insert_primitive_array: tx.prepare("insert into primitive_array(obj_id, stack_trace_serial, type_id, length) values(?1, ?2, ?3, ?4)")?,
+        insert_primitive_array: tx.prepare("insert into primitive_array(obj_id, stack_trace_serial, type_id, length, text) values(?1, ?2, ?3, ?4, ?5)")?,
     };
     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
     let hprof = parse_hprof(&memmap[..]).unwrap();
@@ -158,6 +158,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                     array.stack_trace_serial().num(),
                     primitive_array_type_id(array.primitive_type()),
                     primitive_array_length(&array),
+                    primitive_array_text(&array)?,
                 ])?;
             }
             _ => {}
@@ -195,23 +196,27 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
 }
 
 fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
-    let class_info = &context.class_infos[&instance.class_obj_id()];
+    let mut class_info = Some(&context.class_infos[&instance.class_obj_id()]);
     let mut input = *instance.fields();
-    for (i, field) in class_info.fields.iter().enumerate() {
-        let (next, value) = field
-            .field_type()
-            .parse_value(input, context.id_size)
-            .unwrap();
-        input = next;
-        let (float, int, obj) = field_value_tuple(value);
-        context.statements.insert_field_value.execute(params![
-            instance.obj_id().id(),
-            class_info.id.id(),
-            i,
-            float,
-            int,
-            obj,
-        ])?;
+    while class_info.is_some() {
+        let class = class_info.unwrap();
+        for (i, field) in class.fields.iter().enumerate() {
+            let (next, value) = field
+                .field_type()
+                .parse_value(input, context.id_size)
+                .unwrap();
+            input = next;
+            let (float, int, obj) = field_value_tuple(value);
+            context.statements.insert_field_value.execute(params![
+                instance.obj_id().id(),
+                class.id.id(),
+                i,
+                float,
+                int,
+                obj,
+            ])?;
+        }
+        class_info = class.super_id.map(|id| &context.class_infos[&id]);
     }
     context.statements.insert_instance.execute(params![
         instance.obj_id().id(),
@@ -273,4 +278,12 @@ fn primitive_array_length(array: &PrimitiveArray) -> usize {
         PrimitiveArrayType::Int => array.ints().unwrap().count(),
         PrimitiveArrayType::Long => array.longs().unwrap().count(),
     }
+}
+
+fn primitive_array_text(array: &PrimitiveArray) -> Result<Option<String>> {
+    if array.primitive_type() != PrimitiveArrayType::Char {
+        return Ok(None)
+    }
+    let chars: Vec<u16> = array.chars().unwrap().map(|c| c.unwrap()).collect();
+    Ok(Some(String::from_utf16(&chars)?))
 }

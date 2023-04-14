@@ -79,8 +79,14 @@ create table obj_array (
     obj_id integer not null,
     stack_trace_serial integer not null,
     class_obj_id integer not null,
-    -- TODO Remove once we list elements elsewhere.
     length integer not null
+);
+
+create table obj_array_item (
+    id integer primary key,
+    array_obj_id integer not null,
+    ind integer not null,
+    obj_id integer not null
 );
 
 create table primitive_array (
@@ -88,6 +94,8 @@ create table primitive_array (
     obj_id integer not null,
     stack_trace_serial integer not null,
     type_id integer not null,
-    -- TODO Remove once we list elements elsewhere.
-    length integer not null
+    length integer not null,
+    text text -- not null if char array
 );
+
+-- TODO other primitive array data
