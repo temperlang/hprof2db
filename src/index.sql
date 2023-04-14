@@ -4,6 +4,8 @@ create unique index name_name_id on name(name_id);
 
 create unique index load_class_serial on load_class(serial);
 create index load_class_obj_id on load_class(obj_id);
+create index load_class_name_id on load_class(name_id);
+create index load_class_obj_id_name_id on load_class(obj_id, name_id);
 create index load_class_stack_trace_serial on load_class(stack_trace_serial);
 
 create unique index class_obj_id on class(obj_id);
@@ -25,7 +27,7 @@ create index primitive_array_type_id on primitive_array(type_id);
 
 create view ez_class as
 with lclass as (
-    select distinct obj_id, stack_trace_serial, name_id from load_class
+    select distinct obj_id, name_id from load_class
 )
 select
     class.id,
