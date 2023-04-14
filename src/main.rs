@@ -2,7 +2,7 @@ use anyhow::Result;
 use jvm_hprof::{
     heap_dump::{
         Class, FieldDescriptor, FieldType, FieldValue, PrimitiveArray, PrimitiveArrayType,
-        SubRecord,
+        SubRecord, Instance,
     },
     parse_hprof, HeapDumpSegment, Id, IdSize, RecordTag,
 };
@@ -139,28 +139,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
             SubRecord::Class(class) => process_class(class, context)?,
             SubRecord::Instance(instance) => {
                 count += 1;
-                let class_info = &context.class_infos[&instance.class_obj_id()];
-                let mut input = *instance.fields();
-                for (i, field) in class_info.fields.iter().enumerate() {
-                    let (next, value) = field
-                        .field_type()
-                        .parse_value(input, context.id_size)
-                        .unwrap();
-                    input = next;
-                    let (float, int, obj) = field_value_tuple(value);
-                    context.statements.insert_field_value.execute(params![
-                        instance.obj_id().id(),
-                        i,
-                        float,
-                        int,
-                        obj,
-                    ])?;
-                }
-                context.statements.insert_instance.execute(params![
-                    instance.obj_id().id(),
-                    instance.stack_trace_serial().num(),
-                    instance.class_obj_id().id(),
-                ])?;
+                process_instance(instance, context)?;
             }
             SubRecord::ObjectArray(array) => {
                 // for thing in array.elements(id_size) {
@@ -211,6 +190,32 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
         class.stack_trace_serial().num(),
         class.super_class_obj_id().map(|sup| sup.id()),
         class.instance_size_bytes(),
+    ])?;
+    Ok(())
+}
+
+fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
+    let class_info = &context.class_infos[&instance.class_obj_id()];
+    let mut input = *instance.fields();
+    for (i, field) in class_info.fields.iter().enumerate() {
+        let (next, value) = field
+            .field_type()
+            .parse_value(input, context.id_size)
+            .unwrap();
+        input = next;
+        let (float, int, obj) = field_value_tuple(value);
+        context.statements.insert_field_value.execute(params![
+            instance.obj_id().id(),
+            i,
+            float,
+            int,
+            obj,
+        ])?;
+    }
+    context.statements.insert_instance.execute(params![
+        instance.obj_id().id(),
+        instance.stack_trace_serial().num(),
+        instance.class_obj_id().id(),
     ])?;
     Ok(())
 }
