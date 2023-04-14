@@ -28,11 +28,26 @@ create table class (
     instance_size integer not null
 );
 
+create table field_info (
+    id integer primary key,
+    class_obj_id integer not null,
+    ind integer not null,
+    name_id integer not null,
+    type_id integer not null
+);
+
 create table instance (
     id integer primary key,
     obj_id integer not null,
     stack_trace_serial integer not null,
     class_obj_id integer not null
+);
+
+create table field_value (
+    id integer primary key,
+    obj_id integer not null,
+    ind integer not null,
+    value integer not null -- might or might not be an obj_id
 );
 
 create table type (

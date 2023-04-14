@@ -3,17 +3,26 @@
 create unique index name_name_id on name(name_id);
 
 create unique index load_class_serial on load_class(serial);
-create index load_class_obj_id on load_class(obj_id);
-create index load_class_name_id on load_class(name_id);
 create index load_class_obj_id_name_id on load_class(obj_id, name_id);
+create index load_class_name_id on load_class(name_id);
 create index load_class_stack_trace_serial on load_class(stack_trace_serial);
 
 create unique index class_obj_id on class(obj_id);
 create index class_stack_trace_serial on class(stack_trace_serial);
 create index class_super_obj_id on class(super_obj_id);
 
+create unique index field_info_class_obj_id_index
+    on field_info(class_obj_id, ind)
+;
+create unique index field_info_class_obj_id_name_id
+    on field_info(class_obj_id, name_id)
+;
+
 create index instance_obj_id on instance(obj_id);
 create index instance_class_obj_id on instance(class_obj_id);
+
+create unique index field_value_obj_id_index on field_value(obj_id, ind);
+create unique index field_value_value on field_value(value);
 
 create unique index type_name on type(name);
 

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use jvm_hprof::{
-    heap_dump::{PrimitiveArray, PrimitiveArrayType, SubRecord},
+    heap_dump::{PrimitiveArray, PrimitiveArrayType, SubRecord, FieldType},
     parse_hprof, HeapDumpSegment, IdSize, RecordTag,
 };
 use rusqlite::{params, Connection, Statement};
@@ -28,6 +28,8 @@ fn build_schema(conn: &Connection) -> Result<()> {
 
 struct Statements<'conn> {
     insert_class: Statement<'conn>,
+    insert_field_info: Statement<'conn>,
+    insert_field_value: Statement<'conn>,
     insert_header: Statement<'conn>,
     insert_instance: Statement<'conn>,
     insert_load_class: Statement<'conn>,
@@ -40,6 +42,8 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     let mut statements = Statements {
         insert_class: tx.prepare("insert into class(obj_id, stack_trace_serial, super_obj_id, instance_size) values(?1, ?2, ?3, ?4)")?,
+        insert_field_info: tx.prepare("insert into field_info(class_obj_id, ind, name_id, type_id) values(?1, ?2, ?3, ?4)")?,
+        insert_field_value: tx.prepare("insert into field_value(obj_id, ind, value) values(?1, ?2, ?3)")?,
         insert_header: tx.prepare("insert into header(label, id_size, timestamp) values(?1, ?2, ?3)")?,
         insert_instance: tx.prepare("insert into instance(obj_id, stack_trace_serial, class_obj_id) values(?1, ?2, ?3)")?,
         insert_load_class: tx.prepare("insert into load_class(serial, obj_id, stack_trace_serial, name_id) values(?1, ?2, ?3, ?4)")?,
@@ -117,6 +121,16 @@ fn parse_dump_records(
         let sub = sub.unwrap();
         match sub {
             SubRecord::Class(class) => {
+                for (i, descriptor) in class.instance_field_descriptors().enumerate() {
+                    let descriptor = descriptor.unwrap();
+                    statements.insert_field_info.execute(params![
+                        class.obj_id().id(),
+                        i,
+                        descriptor.name_id().id(),
+                        field_type_id(descriptor.field_type()),
+                    ])?;
+                    // TODO Duplicate supertype fields?
+                }
                 statements.insert_class.execute(params![
                     class.obj_id().id(),
                     class.stack_trace_serial().num(),
@@ -126,6 +140,7 @@ fn parse_dump_records(
             }
             SubRecord::Instance(instance) => {
                 count += 1;
+                // instance.fields();
                 statements.insert_instance.execute(params![
                     instance.obj_id().id(),
                     instance.stack_trace_serial().num(),
@@ -133,6 +148,9 @@ fn parse_dump_records(
                 ])?;
             }
             SubRecord::ObjectArray(array) => {
+                // for thing in array.elements(id_size) {
+                //     let thing = thing.unwrap().unwrap().id();
+                // }
                 statements.insert_obj_array.execute(params![
                     array.obj_id().id(),
                     array.stack_trace_serial().num(),
@@ -152,6 +170,20 @@ fn parse_dump_records(
         }
     }
     Ok(count)
+}
+
+fn field_type_id(id: FieldType) -> i32 {
+    match id {
+        FieldType::ObjectId => 2,
+        FieldType::Boolean => 4,
+        FieldType::Char => 5,
+        FieldType::Float => 6,
+        FieldType::Double => 7,
+        FieldType::Byte => 8,
+        FieldType::Short => 9,
+        FieldType::Int => 10,
+        FieldType::Long => 11,
+    }
 }
 
 fn primitive_array_type_id(id: PrimitiveArrayType) -> i32 {

@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.70"
-indoc = "2.0.1"
 jvm-hprof = "0.1.0"
 memmap = "0.7.0"
 

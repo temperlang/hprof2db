@@ -1,6 +1,6 @@
 ## Example queries
 
-List classes with instance counts and total sizes.
+List classes with instance counts and total sizes:
 
 ```sql
 select
@@ -11,6 +11,19 @@ select
     name
 from ez_total
 order by size desc
+;
+```
+
+List all class instance field names:
+
+```sql
+select cn.text class, fn.text field, t.name type
+from field_info f
+    join ez_class c on f.class_obj_id = c.obj_id
+    join name cn on c.name_id = cn.name_id
+    join name fn on f.name_id = fn.name_id
+    join type t on f.type_id = t.id
+order by cn.text, ind
 ;
 ```
 
