@@ -45,12 +45,13 @@ create table instance (
 
 create table field_value (
     id integer primary key,
-    obj_id integer not null,
+    instance_obj_id integer not null,
+    class_obj_id integer not null, -- because super types
     ind integer not null,
     -- Only one at most of these should be non null.
-    value_float real,
-    value_int integer,
-    value_obj_id integer
+    float real,
+    int integer,
+    obj_id integer
 );
 
 create table type (

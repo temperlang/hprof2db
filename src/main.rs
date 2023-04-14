@@ -58,7 +58,7 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     let mut statements = Statements {
         insert_class: tx.prepare("insert into class(obj_id, stack_trace_serial, super_obj_id, instance_size) values(?1, ?2, ?3, ?4)")?,
         insert_field_info: tx.prepare("insert into field_info(class_obj_id, ind, name_id, type_id) values(?1, ?2, ?3, ?4)")?,
-        insert_field_value: tx.prepare("insert into field_value(obj_id, ind, value_float, value_int, value_obj_id) values(?1, ?2, ?3, ?4, ?5)")?,
+        insert_field_value: tx.prepare("insert into field_value(instance_obj_id, class_obj_id, ind, float, int, obj_id) values(?1, ?2, ?3, ?4, ?5, ?6)")?,
         insert_header: tx.prepare("insert into header(label, id_size, timestamp) values(?1, ?2, ?3)")?,
         insert_instance: tx.prepare("insert into instance(obj_id, stack_trace_serial, class_obj_id) values(?1, ?2, ?3)")?,
         insert_load_class: tx.prepare("insert into load_class(serial, obj_id, stack_trace_serial, name_id) values(?1, ?2, ?3, ?4)")?,
@@ -206,6 +206,7 @@ fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
         let (float, int, obj) = field_value_tuple(value);
         context.statements.insert_field_value.execute(params![
             instance.obj_id().id(),
+            class_info.id.id(),
             i,
             float,
             int,

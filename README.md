@@ -33,11 +33,10 @@ List fields referencing instances of particular class (replacing
 ```sql
 select count(*) count, oc.name class, fn.text field from ez_class c
 join instance i on c.obj_id = i.class_obj_id
-join field_value v on i.obj_id = v.value_obj_id
-join instance oi on v.obj_id = oi.obj_id
-join field_info f on oi.class_obj_id = f.class_obj_id and v.ind = f.ind
+join field_value v on i.obj_id = v.obj_id
+join field_info f on v.class_obj_id = f.class_obj_id and v.ind = f.ind
 join name fn on f.name_id = fn.name_id
-join ez_class oc on oi.class_obj_id = oc.obj_id
+join ez_class oc on v.class_obj_id = oc.obj_id
 where c.name like 'class/name/Here'
 group by oc.name, fn.text
 order by count(*) desc
