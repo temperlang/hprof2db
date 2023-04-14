@@ -47,7 +47,10 @@ create table field_value (
     id integer primary key,
     obj_id integer not null,
     ind integer not null,
-    value integer not null -- might or might not be an obj_id
+    -- Only one at most of these should be non null.
+    value_float real,
+    value_int integer,
+    value_obj_id integer
 );
 
 create table type (

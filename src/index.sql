@@ -22,7 +22,7 @@ create index instance_obj_id on instance(obj_id);
 create index instance_class_obj_id on instance(class_obj_id);
 
 create unique index field_value_obj_id_index on field_value(obj_id, ind);
-create unique index field_value_value on field_value(value);
+create unique index field_value_value_obj_id on field_value(value_obj_id);
 
 create unique index type_name on type(name);
 
