@@ -15,10 +15,14 @@ fn main() -> Result<()> {
     let db_path = args[2].as_str();
     println!("Read: {path}");
     println!("Write: {db_path}");
+    // Do first pass to map ids.
+    let mapping = map_ids(fs::File::open(path)?)?;
+    // And second pass to insert data.
     let mut conn = Connection::open(db_path)?;
     build_schema(&conn)?;
-    parse_records(fs::File::open(path)?, &mut conn)?;
-    println!("Index"); // faster after insert
+    parse_records(fs::File::open(path)?, &mut conn, &mapping)?;
+    // Index after insert to faster overall.
+    println!("Index");
     conn.execute_batch(include_str!("index.sql"))?;
     Ok(())
 }
@@ -49,22 +53,87 @@ struct ClassInfo {
     super_id: Option<Id>,
 }
 
-struct Context<'conn> {
+struct Mapping {
+    class_ids: HashMap<Id, i64>,
+    instance_ids: HashMap<Id, i64>,
+    name_ids: HashMap<Id, i64>,
+}
+
+fn ensure_id(map: &mut HashMap<Id, i64>, id: Id) {
+    if !map.contains_key(&id) {
+        map.insert(id, (map.len() + 1).try_into().unwrap());
+    }
+}
+
+fn insert_id(map: &mut HashMap<Id, i64>, id: Id) {
+    map.insert(id, (map.len() + 1).try_into().unwrap());
+}
+
+struct Context<'conn, 'mapping> {
     class_infos: HashMap<Id, ClassInfo>,
     id_size: IdSize,
-    instance_ids: HashMap<Id, i64>, // potentially very large; ok???
-    name_ids: HashMap<Id, i64>,
+    mapping: &'mapping Mapping,
     statements: Statements<'conn>,
     tx: &'conn Transaction<'conn>,
 }
 
-fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
+fn map_ids(file: fs::File) -> Result<Mapping> {
+    let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
+    let hprof = parse_hprof(&memmap[..]).unwrap();
+    let mut mapping = Mapping {
+        class_ids: HashMap::new(),
+        instance_ids: HashMap::new(),
+        name_ids: HashMap::new(),
+    };
+    for record in hprof.records_iter() {
+        let record = record.unwrap();
+        match record.tag() {
+            RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
+                let record = record.as_heap_dump_segment().unwrap().unwrap();
+                for sub in record.sub_records() {
+                    let sub = sub.unwrap();
+                    match sub {
+                        SubRecord::Class(class) => {
+                            ensure_id(&mut mapping.class_ids, class.obj_id());
+                        }
+                        SubRecord::Instance(instance) => {
+                            insert_id(&mut mapping.instance_ids, instance.obj_id());
+                        }
+                        SubRecord::ObjectArray(array) => {
+                            insert_id(&mut mapping.instance_ids, array.obj_id());
+                        }
+                        SubRecord::PrimitiveArray(array) => {
+                            insert_id(&mut mapping.instance_ids, array.obj_id());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            RecordTag::LoadClass => {
+                let class = record.as_load_class().unwrap().unwrap();
+                ensure_id(&mut mapping.class_ids, class.class_obj_id());
+            }
+            RecordTag::Utf8 => {
+                let name = record.as_utf_8().unwrap().unwrap();
+                insert_id(&mut mapping.name_ids, name.name_id());
+            }
+            _ => {}
+        }
+    }
+    println!("Classes: {}", mapping.class_ids.len());
+    println!("Names: {}", mapping.name_ids.len());
+    println!("Instances: {}", mapping.instance_ids.len());
+    Ok(mapping)
+}
+
+fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Result<()> {
     let tx = conn.transaction()?;
     let mut statements = Statements {
         insert_class: tx.prepare(
             "insert into class(id, name_id, super_id, instance_size) values(?1, ?2, ?3, ?4)",
         )?,
-        insert_field: tx.prepare("insert into field(class_id, name_id, ind, type_id) values(?1, ?2, ?3, ?4)")?,
+        insert_field: tx
+            .prepare("insert into field(class_id, name_id, ind, type_id) values(?1, ?2, ?3, ?4)")?,
         insert_field_value: tx
             .prepare("insert into field_value(instance_id, field_id, obj_id) values(?1, ?2, ?3)")?,
         insert_header: tx
@@ -79,11 +148,6 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     };
     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
     let hprof = parse_hprof(&memmap[..]).unwrap();
-    let mut record_count = 0;
-    let mut dump_count = 0;
-    let mut instance_count = 0;
-    let mut class_count = 0;
-    let mut name_count = 0;
     let header = hprof.header();
     statements.insert_header.execute(params![
         header.label().unwrap(),
@@ -96,8 +160,7 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     let mut context = Context {
         class_infos: HashMap::new(),
         id_size: header.id_size(),
-        instance_ids: HashMap::new(),
-        name_ids: HashMap::new(),
+        mapping: &mapping,
         statements,
         tx: &tx,
     };
@@ -105,71 +168,57 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     // TODO Infer sizes using calculations?
     for record in hprof.records_iter() {
         let record = record.unwrap();
-        record_count += 1;
         match record.tag() {
             RecordTag::HeapDump | RecordTag::HeapDumpSegment => {
-                dump_count += 1;
-                instance_count += parse_dump_records(
+                parse_dump_records(
                     &record.as_heap_dump_segment().unwrap().unwrap(),
                     &mut context,
                 )?;
             }
             RecordTag::LoadClass => {
-                class_count += 1;
                 let class = record.as_load_class().unwrap().unwrap();
-                let mut do_insert = false;
                 match context.class_infos.get_mut(&class.class_obj_id()) {
                     Some(info) => {
                         if info.name_id == 0 {
-                            info.name_id = context.name_ids[&class.class_name_id()];
+                            info.name_id = mapping.name_ids[&class.class_name_id()];
                         }
-                        do_insert = info.instance_size >= 0;
+                        if info.instance_size >= 0 {
+                            let info = &context.class_infos[&class.class_obj_id()];
+                            context.statements.insert_class.execute(params![
+                                info.id,
+                                info.name_id,
+                                info.super_id.map(|sup| mapping.class_ids[&sup]),
+                                info.instance_size,
+                            ])?;
+                        }
                     }
                     None => {
                         context.class_infos.insert(
                             class.class_obj_id(),
                             ClassInfo {
-                                id: (context.class_infos.len() + 1).try_into().unwrap(),
+                                id: mapping.class_ids[&class.class_obj_id()],
                                 fields: vec![],
                                 field_ids: vec![],
                                 instance_size: -1,
-                                name_id: context.name_ids[&class.class_name_id()],
+                                name_id: mapping.name_ids[&class.class_name_id()],
                                 super_id: None,
                             },
                         );
                     }
                 }
-                if do_insert {
-                    let info = &context.class_infos[&class.class_obj_id()];
-                    context.statements.insert_class.execute(params![
-                        info.id,
-                        info.name_id,
-                        info.super_id.map(|sup| context.class_infos[&sup].id),
-                        info.instance_size,
-                    ])?;
-                }
             }
             RecordTag::Utf8 => {
-                name_count += 1;
                 let name = record.as_utf_8().unwrap().unwrap();
                 context
                     .statements
                     .insert_name
                     .execute(params![name.text()])?;
-                context
-                    .name_ids
-                    .insert(name.name_id(), context.tx.last_insert_rowid());
             }
             _ => {}
         }
     }
     drop(context);
     tx.commit()?;
-    println!("Records: {record_count}");
-    println!("Classes: {class_count}");
-    println!("Dumps: {dump_count}");
-    println!("Names: {name_count}");
-    println!("Instances: {instance_count}");
     Ok(())
 }
 
@@ -184,10 +233,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                 process_instance(instance, context)?;
             }
             SubRecord::ObjectArray(array) => {
-                let id = context.instance_ids.len() + 1;
-                context
-                    .instance_ids
-                    .insert(array.obj_id(), id.try_into().unwrap());
+                let id = context.mapping.instance_ids[&array.obj_id()];
                 let items = array.elements(context.id_size);
                 context.statements.insert_obj_array.execute(params![
                     id,
@@ -199,10 +245,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                 // }
             }
             SubRecord::PrimitiveArray(array) => {
-                let id = context.instance_ids.len() + 1;
-                context
-                    .instance_ids
-                    .insert(array.obj_id(), id.try_into().unwrap());
+                let id = context.mapping.instance_ids[&array.obj_id()];
                 context.statements.insert_primitive_array.execute(params![
                     id,
                     primitive_array_type_id(array.primitive_type()),
@@ -255,7 +298,7 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
     for (i, descriptor) in info.fields.iter().enumerate() {
         context.statements.insert_field.execute(params![
             info.id,
-            context.name_ids[&descriptor.name_id()],
+            context.mapping.name_ids[&descriptor.name_id()],
             i,
             field_type_id(descriptor.field_type()),
         ])?;
@@ -265,10 +308,7 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
 }
 
 fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
-    let id = context.instance_ids.len() + 1;
-    context
-        .instance_ids
-        .insert(instance.obj_id(), id.try_into().unwrap());
+    let id = context.mapping.instance_ids[&instance.obj_id()];
     context.statements.insert_instance.execute(params![
         id,
         context.class_infos[&instance.class_obj_id()].id,
@@ -288,7 +328,7 @@ fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
                 context.statements.insert_field_value.execute(params![
                     id,
                     class.field_ids[i],
-                    obj.unwrap(),
+                    obj.map(|o| context.mapping.instance_ids.get(&o)),
                 ])?;
             }
         }
@@ -311,9 +351,9 @@ fn field_type_id(id: FieldType) -> i32 {
     }
 }
 
-fn field_value_tuple(value: FieldValue) -> (Option<f64>, Option<i64>, Option<u64>) {
+fn field_value_tuple(value: FieldValue) -> (Option<f64>, Option<i64>, Option<Id>) {
     match value {
-        FieldValue::ObjectId(obj) => (None, None, obj.map(|o| o.id())),
+        FieldValue::ObjectId(obj) => (None, None, obj),
         FieldValue::Boolean(b) => (None, Some(b.into()), None),
         FieldValue::Char(c) => (None, Some(c.into()), None),
         FieldValue::Float(f) => (Some(f.into()), None, None),

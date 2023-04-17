@@ -28,8 +28,6 @@ create table field (
 create table instance (
     id integer primary key,
     class_id integer not null
-    -- Other obj ids are
-    -- obj_id integer not null
 );
 
 create table field_value (
