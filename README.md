@@ -17,13 +17,12 @@ order by size desc
 List all class instance field names:
 
 ```sql
-select cn.text class, fn.text field, t.name type
-from field_info f
-    join ez_class c on f.class_obj_id = c.obj_id
-    join name cn on c.name_id = cn.name_id
-    join name fn on f.name_id = fn.name_id
-    join type t on f.type_id = t.id
-order by cn.text, ind
+select c.name class, fn.text field, t.name type
+from field f
+join ez_class c on f.class_id = c.id
+join name fn on f.name_id = fn.id
+join type t on f.type_id = t.id
+order by c.name, fn.text
 ;
 ```
 
@@ -32,26 +31,13 @@ List fields referencing instances of particular class (replacing
 
 ```sql
 select count(*) count, oc.name class, fn.text field from ez_class c
-join instance i on c.obj_id = i.class_obj_id
-join field_value v on i.obj_id = v.obj_id
-join field_info f on v.class_obj_id = f.class_obj_id and v.ind = f.ind
-join name fn on f.name_id = fn.name_id
-join ez_class oc on v.class_obj_id = oc.obj_id
+join instance i on c.id = i.class_id
+join field_value v on i.id = v.obj_id
+join field f on v.field_id = f.id
+join name fn on f.name_id = fn.id
+join ez_class oc on v.class_id = oc.id
 where c.name like 'class/name/Here'
 group by oc.name, fn.text
 order by count(*) desc
-;
-```
-
-Find dupes in `load_class`:
-
-```sql
-with dupe as (
-    select obj_id, name_id, count(*) from load_class
-    group by obj_id having count(*) > 1
-)
-select * from class
-    inner join dupe on class.obj_id = dupe.obj_id
-    inner join name on dupe.name_id = name.name_id
 ;
 ```
