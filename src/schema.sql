@@ -30,6 +30,11 @@ create table instance (
     class_id integer not null
 );
 
+create table hprof_obj_id(
+    id integer primary key,
+    hprof_obj_id integer
+);
+
 create table field_value (
     id integer primary key,
     instance_id integer not null,

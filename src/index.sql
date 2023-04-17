@@ -17,6 +17,20 @@ create index obj_array_class_id on obj_array(class_id);
 
 create index primitive_array_type_id on primitive_array(type_id);
 
+-- Clean up
+
+create index hprof_obj_id_hprof_obj_id on hprof_obj_id(hprof_obj_id);
+
+update field_value
+set obj_id = h.id
+from hprof_obj_id h
+where field_value.obj_id = h.hprof_obj_id
+;
+
+-- TODO Also obj_array!
+
+drop table hprof_obj_id;
+
 -- Views
 
 create view ez_class as

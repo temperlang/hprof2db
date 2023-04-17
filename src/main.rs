@@ -7,7 +7,8 @@ use jvm_hprof::{
     parse_hprof, HeapDumpSegment, Id, IdSize, RecordTag,
 };
 use rusqlite::{params, Connection, Statement, Transaction};
-use std::{collections::HashMap, env, fs};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use std::{collections::HashMap, env, fs, time::SystemTime};
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -16,15 +17,25 @@ fn main() -> Result<()> {
     println!("Read: {path}");
     println!("Write: {db_path}");
     // Do first pass to map ids.
+    println!("{} Map", now());
     let mapping = map_ids(fs::File::open(path)?)?;
     // And second pass to insert data.
+    println!("{} Fill", now());
     let mut conn = Connection::open(db_path)?;
     build_schema(&conn)?;
     parse_records(fs::File::open(path)?, &mut conn, &mapping)?;
     // Index after insert to faster overall.
-    println!("Index");
+    println!("{} Index", now());
     conn.execute_batch(include_str!("index.sql"))?;
+    println!("{} Vacuum", now());
+    conn.execute_batch("vacuum")?;
+    println!("{} Done", now());
     Ok(())
+}
+
+fn now() -> String {
+    let dt: OffsetDateTime = SystemTime::now().into();
+    dt.format(&Rfc3339).unwrap()
 }
 
 fn build_schema(conn: &Connection) -> Result<()> {
@@ -38,6 +49,7 @@ struct Statements<'conn> {
     insert_field: Statement<'conn>,
     insert_field_value: Statement<'conn>,
     insert_header: Statement<'conn>,
+    insert_hprof_obj_id: Statement<'conn>,
     insert_instance: Statement<'conn>,
     insert_name: Statement<'conn>,
     insert_obj_array: Statement<'conn>,
@@ -55,7 +67,7 @@ struct ClassInfo {
 
 struct Mapping {
     class_ids: HashMap<Id, i64>,
-    instance_ids: HashMap<Id, i64>,
+    // instance_ids: HashMap<Id, i64>,
     name_ids: HashMap<Id, i64>,
 }
 
@@ -72,9 +84,18 @@ fn insert_id(map: &mut HashMap<Id, i64>, id: Id) {
 struct Context<'conn, 'mapping> {
     class_infos: HashMap<Id, ClassInfo>,
     id_size: IdSize,
+    instance_id: i64,
     mapping: &'mapping Mapping,
     statements: Statements<'conn>,
     tx: &'conn Transaction<'conn>,
+}
+
+impl<'conn, 'mapping> Context<'conn, 'mapping> {
+    fn next_instance_id(&mut self, obj_id: Id) -> Result<i64> {
+        self.statements.insert_hprof_obj_id.execute(params![obj_id.id()])?;
+        self.instance_id = self.tx.last_insert_rowid();
+        Ok(self.instance_id)
+    }
 }
 
 fn map_ids(file: fs::File) -> Result<Mapping> {
@@ -82,7 +103,7 @@ fn map_ids(file: fs::File) -> Result<Mapping> {
     let hprof = parse_hprof(&memmap[..]).unwrap();
     let mut mapping = Mapping {
         class_ids: HashMap::new(),
-        instance_ids: HashMap::new(),
+        // instance_ids: HashMap::new(),
         name_ids: HashMap::new(),
     };
     for record in hprof.records_iter() {
@@ -95,15 +116,6 @@ fn map_ids(file: fs::File) -> Result<Mapping> {
                     match sub {
                         SubRecord::Class(class) => {
                             ensure_id(&mut mapping.class_ids, class.obj_id());
-                        }
-                        SubRecord::Instance(instance) => {
-                            insert_id(&mut mapping.instance_ids, instance.obj_id());
-                        }
-                        SubRecord::ObjectArray(array) => {
-                            insert_id(&mut mapping.instance_ids, array.obj_id());
-                        }
-                        SubRecord::PrimitiveArray(array) => {
-                            insert_id(&mut mapping.instance_ids, array.obj_id());
                         }
                         _ => {}
                     }
@@ -122,7 +134,6 @@ fn map_ids(file: fs::File) -> Result<Mapping> {
     }
     println!("Classes: {}", mapping.class_ids.len());
     println!("Names: {}", mapping.name_ids.len());
-    println!("Instances: {}", mapping.instance_ids.len());
     Ok(mapping)
 }
 
@@ -138,6 +149,7 @@ fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Re
             .prepare("insert into field_value(instance_id, field_id, obj_id) values(?1, ?2, ?3)")?,
         insert_header: tx
             .prepare("insert into header(label, id_size, timestamp) values(?1, ?2, ?3)")?,
+        insert_hprof_obj_id: tx.prepare("insert into hprof_obj_id(hprof_obj_id) values(?1)")?,
         insert_instance: tx.prepare("insert into instance(id, class_id) values(?1, ?2)")?,
         insert_name: tx.prepare("insert into name(text) values(?1)")?,
         insert_obj_array: tx
@@ -160,6 +172,7 @@ fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Re
     let mut context = Context {
         class_infos: HashMap::new(),
         id_size: header.id_size(),
+        instance_id: 0,
         mapping: &mapping,
         statements,
         tx: &tx,
@@ -217,6 +230,7 @@ fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Re
             _ => {}
         }
     }
+    println!("Instances: {}", context.instance_id);
     drop(context);
     tx.commit()?;
     Ok(())
@@ -233,7 +247,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                 process_instance(instance, context)?;
             }
             SubRecord::ObjectArray(array) => {
-                let id = context.mapping.instance_ids[&array.obj_id()];
+                let id = context.next_instance_id(array.obj_id())?;
                 let items = array.elements(context.id_size);
                 context.statements.insert_obj_array.execute(params![
                     id,
@@ -245,7 +259,7 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                 // }
             }
             SubRecord::PrimitiveArray(array) => {
-                let id = context.mapping.instance_ids[&array.obj_id()];
+                let id = context.next_instance_id(array.obj_id())?;
                 context.statements.insert_primitive_array.execute(params![
                     id,
                     primitive_array_type_id(array.primitive_type()),
@@ -308,7 +322,7 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
 }
 
 fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
-    let id = context.mapping.instance_ids[&instance.obj_id()];
+    let id = context.next_instance_id(instance.obj_id())?;
     context.statements.insert_instance.execute(params![
         id,
         context.class_infos[&instance.class_obj_id()].id,
@@ -328,7 +342,7 @@ fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
                 context.statements.insert_field_value.execute(params![
                     id,
                     class.field_ids[i],
-                    obj.map(|o| context.mapping.instance_ids.get(&o)),
+                    obj,
                 ])?;
             }
         }
@@ -351,9 +365,9 @@ fn field_type_id(id: FieldType) -> i32 {
     }
 }
 
-fn field_value_tuple(value: FieldValue) -> (Option<f64>, Option<i64>, Option<Id>) {
+fn field_value_tuple(value: FieldValue) -> (Option<f64>, Option<i64>, Option<i64>) {
     match value {
-        FieldValue::ObjectId(obj) => (None, None, obj),
+        FieldValue::ObjectId(obj) => (None, None, obj.map(|o| o.id().try_into().unwrap())),
         FieldValue::Boolean(b) => (None, Some(b.into()), None),
         FieldValue::Char(c) => (None, Some(c.into()), None),
         FieldValue::Float(f) => (Some(f.into()), None, None),
