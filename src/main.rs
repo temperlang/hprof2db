@@ -265,11 +265,16 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                     items.count(),
                 ])?;
                 for (i, obj_id) in array.elements(context.id_size).enumerate() {
-                    context.statements.insert_obj_array_item.execute(params![
-                        id,
-                        i,
-                        obj_id.unwrap().map(|o| o.id()),
-                    ])?;
+                    let obj_id = obj_id.unwrap();
+                    // Because we have the explicit index, we can see which we
+                    // skipped for being null.
+                    if obj_id.is_some() {
+                        context.statements.insert_obj_array_item.execute(params![
+                            id,
+                            i,
+                            obj_id.unwrap().id(),
+                        ])?;
+                    }
                 }
             }
             SubRecord::PrimitiveArray(array) => {
