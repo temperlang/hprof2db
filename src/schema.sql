@@ -40,6 +40,7 @@ create table field_value (
     instance_id integer not null,
     field_id integer not null,
     -- Only one at most of these should be non null.
+    -- And for now, I care most just about object references.
     -- float real,
     -- int integer,
     obj_id integer
@@ -75,7 +76,7 @@ create table obj_array_item (
     id integer primary key,
     array_id integer not null,
     ind integer not null,
-    obj_id integer not null
+    obj_id integer
 );
 
 create table primitive_array (

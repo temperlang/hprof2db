@@ -53,6 +53,7 @@ struct Statements<'conn> {
     insert_instance: Statement<'conn>,
     insert_name: Statement<'conn>,
     insert_obj_array: Statement<'conn>,
+    insert_obj_array_item: Statement<'conn>,
     insert_primitive_array: Statement<'conn>,
 }
 
@@ -167,6 +168,8 @@ fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Re
         insert_name: tx.prepare("insert into name(text) values(?1)")?,
         insert_obj_array: tx
             .prepare("insert into obj_array(id, class_id, length) values(?1, ?2, ?3)")?,
+        insert_obj_array_item: tx
+            .prepare("insert into obj_array_item(array_id, ind, obj_id) values(?1, ?2, ?3)")?,
         insert_primitive_array: tx.prepare(
             "insert into primitive_array(id, type_id, length, text) values(?1, ?2, ?3, ?4)",
         )?,
@@ -261,9 +264,13 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                     context.class_infos[&array.array_class_obj_id()].id,
                     items.count(),
                 ])?;
-                // for thing in array.elements(id_size) {
-                //     let thing = thing.unwrap().unwrap().id();
-                // }
+                for (i, obj_id) in array.elements(context.id_size).enumerate() {
+                    context.statements.insert_obj_array_item.execute(params![
+                        id,
+                        i,
+                        obj_id.unwrap().map(|o| o.id()),
+                    ])?;
+                }
             }
             SubRecord::PrimitiveArray(array) => {
                 let id = context.next_instance_id(array.obj_id())?;
