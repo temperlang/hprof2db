@@ -7,8 +7,8 @@ use jvm_hprof::{
     parse_hprof, HeapDumpSegment, Id, IdSize, RecordTag,
 };
 use rusqlite::{params, Connection, Statement, Transaction};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use std::{collections::HashMap, env, fs, time::SystemTime};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -67,6 +67,7 @@ struct ClassInfo {
 
 struct Mapping {
     class_ids: HashMap<Id, i64>,
+    // Can get too many instances to be worth premapping.
     // instance_ids: HashMap<Id, i64>,
     name_ids: HashMap<Id, i64>,
 }
@@ -92,10 +93,22 @@ struct Context<'conn, 'mapping> {
 
 impl<'conn, 'mapping> Context<'conn, 'mapping> {
     fn next_instance_id(&mut self, obj_id: Id) -> Result<i64> {
-        self.statements.insert_hprof_obj_id.execute(params![obj_id.id()])?;
+        self.statements
+            .insert_hprof_obj_id
+            .execute(params![obj_id.id()])?;
         self.instance_id = self.tx.last_insert_rowid();
         Ok(self.instance_id)
     }
+}
+
+fn insert_class(statements: &mut Statements, mapping: &Mapping, info: &ClassInfo) -> Result<()> {
+    statements.insert_class.execute(params![
+        info.id,
+        info.name_id,
+        info.super_id.map(|sup| mapping.class_ids[&sup]),
+        info.instance_size,
+    ])?;
+    Ok(())
 }
 
 fn map_ids(file: fs::File) -> Result<Mapping> {
@@ -196,13 +209,7 @@ fn parse_records(file: fs::File, conn: &mut Connection, mapping: &Mapping) -> Re
                             info.name_id = mapping.name_ids[&class.class_name_id()];
                         }
                         if info.instance_size >= 0 {
-                            let info = &context.class_infos[&class.class_obj_id()];
-                            context.statements.insert_class.execute(params![
-                                info.id,
-                                info.name_id,
-                                info.super_id.map(|sup| mapping.class_ids[&sup]),
-                                info.instance_size,
-                            ])?;
+                            insert_class(&mut context.statements, context.mapping, &info)?;
                         }
                     }
                     None => {
@@ -274,12 +281,11 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
 }
 
 fn process_class(class: Class, context: &mut Context) -> Result<()> {
-    let mut do_insert = false;
     match context.class_infos.get_mut(&class.obj_id()) {
         Some(info) => {
             info.super_id = class.super_class_obj_id();
             info.instance_size = class.instance_size_bytes().into();
-            do_insert = true;
+            insert_class(&mut context.statements, context.mapping, &info)?;
         }
         None => {
             context.class_infos.insert(
@@ -295,15 +301,6 @@ fn process_class(class: Class, context: &mut Context) -> Result<()> {
             );
         }
     };
-    if do_insert {
-        let info = &context.class_infos[&class.obj_id()];
-        context.statements.insert_class.execute(params![
-            info.id,
-            info.name_id,
-            info.super_id.map(|sup| context.class_infos[&sup].id),
-            info.instance_size,
-        ])?;
-    }
     let info = context.class_infos.get_mut(&class.obj_id()).unwrap();
     info.fields = class
         .instance_field_descriptors()
@@ -406,10 +403,23 @@ fn primitive_array_length(array: &PrimitiveArray) -> usize {
 }
 
 fn primitive_array_text(array: &PrimitiveArray) -> Result<Option<String>> {
-    // TODO Byte arrays also!!!
-    if array.primitive_type() != PrimitiveArrayType::Char {
-        return Ok(None);
-    }
-    let chars: Vec<u16> = array.chars().unwrap().map(|c| c.unwrap()).collect();
-    Ok(Some(String::from_utf16(&chars)?))
+    let text = match array.primitive_type() {
+        PrimitiveArrayType::Byte => {
+            let bytes: Vec<u8> = array
+                .bytes()
+                .unwrap()
+                .map(|c| unsafe { std::mem::transmute(c.unwrap()) })
+                .collect();
+            match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(_) => return Ok(None),
+            }
+        }
+        PrimitiveArrayType::Char => {
+            let chars: Vec<u16> = array.chars().unwrap().map(|c| c.unwrap()).collect();
+            String::from_utf16(&chars)?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(text))
 }
