@@ -7,56 +7,48 @@ create table header (
 
 create table name (
     id integer primary key,
-    name_id integer not null,
     text text not null
-);
-
-create table load_class (
-    id integer primary key,
-    serial integer not null,
-    obj_id integer not null,
-    stack_trace_serial integer not null,
-    name_id not null
-    -- foreign key(name_id) references name(name_id)
 );
 
 create table class (
     id integer primary key,
-    obj_id integer not null,
-    stack_trace_serial integer not null,
-    super_obj_id integer,
+    name_id not null,
+    super_id integer,
     instance_size integer not null
 );
 
-create table field_info (
+create table field (
     id integer primary key,
-    class_obj_id integer not null,
-    ind integer not null,
+    class_id integer not null,
     name_id integer not null,
+    ind integer not null,
     type_id integer not null
 );
 
 create table instance (
     id integer primary key,
-    obj_id integer not null,
-    stack_trace_serial integer not null,
-    class_obj_id integer not null
+    class_id integer not null
+);
+
+create table hprof_obj_id(
+    id integer primary key,
+    hprof_obj_id integer
 );
 
 create table field_value (
     id integer primary key,
-    instance_obj_id integer not null,
-    class_obj_id integer not null, -- because super types
-    ind integer not null,
+    instance_id integer not null,
+    field_id integer not null,
     -- Only one at most of these should be non null.
-    float real,
-    int integer,
+    -- And for now, I care most just about object references.
+    -- float real,
+    -- int integer,
     obj_id integer
 );
 
 create table type (
     id integer primary key,
-    name text not null,
+    name text not null unique,
     size integer not null
 );
 -- Expected sizes when when used in arrays.
@@ -76,18 +68,22 @@ insert into type (id, name, size) values
 
 create table obj_array (
     id integer primary key,
-    obj_id integer not null,
-    stack_trace_serial integer not null,
-    class_obj_id integer not null,
-    -- TODO Remove once we list elements elsewhere.
+    class_id integer not null,
     length integer not null
+);
+
+create table obj_array_item (
+    id integer primary key,
+    array_id integer not null,
+    ind integer not null,
+    obj_id integer
 );
 
 create table primitive_array (
     id integer primary key,
-    obj_id integer not null,
-    stack_trace_serial integer not null,
     type_id integer not null,
-    -- TODO Remove once we list elements elsewhere.
-    length integer not null
+    length integer not null,
+    text text -- not null if char array or utf8-compatible byte array
 );
+
+-- TODO other primitive array data
