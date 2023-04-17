@@ -1,12 +1,12 @@
 use anyhow::Result;
 use jvm_hprof::{
     heap_dump::{
-        Class, FieldDescriptor, FieldType, FieldValue, PrimitiveArray, PrimitiveArrayType,
-        SubRecord, Instance,
+        Class, FieldDescriptor, FieldType, FieldValue, Instance, PrimitiveArray,
+        PrimitiveArrayType, SubRecord,
     },
     parse_hprof, HeapDumpSegment, Id, IdSize, RecordTag,
 };
-use rusqlite::{params, Connection, Statement};
+use rusqlite::{params, Connection, Statement, Transaction};
 use std::{collections::HashMap, env, fs};
 
 fn main() -> Result<()> {
@@ -31,40 +31,51 @@ fn build_schema(conn: &Connection) -> Result<()> {
 
 struct Statements<'conn> {
     insert_class: Statement<'conn>,
-    insert_field_info: Statement<'conn>,
+    insert_field: Statement<'conn>,
     insert_field_value: Statement<'conn>,
     insert_header: Statement<'conn>,
     insert_instance: Statement<'conn>,
-    insert_load_class: Statement<'conn>,
     insert_name: Statement<'conn>,
     insert_obj_array: Statement<'conn>,
     insert_primitive_array: Statement<'conn>,
 }
 
 struct ClassInfo {
-    id: Id,
-    super_id: Option<Id>,
+    id: i64,
     fields: Vec<FieldDescriptor>,
+    field_ids: Vec<i64>,
+    instance_size: i64,
+    name_id: i64,
+    super_id: Option<Id>,
 }
 
 struct Context<'conn> {
     class_infos: HashMap<Id, ClassInfo>,
     id_size: IdSize,
+    instance_ids: HashMap<Id, i64>, // potentially very large; ok???
+    name_ids: HashMap<Id, i64>,
     statements: Statements<'conn>,
+    tx: &'conn Transaction<'conn>,
 }
 
 fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction()?;
     let mut statements = Statements {
-        insert_class: tx.prepare("insert into class(obj_id, stack_trace_serial, super_obj_id, instance_size) values(?1, ?2, ?3, ?4)")?,
-        insert_field_info: tx.prepare("insert into field_info(class_obj_id, ind, name_id, type_id) values(?1, ?2, ?3, ?4)")?,
-        insert_field_value: tx.prepare("insert into field_value(instance_obj_id, class_obj_id, ind, float, int, obj_id) values(?1, ?2, ?3, ?4, ?5, ?6)")?,
-        insert_header: tx.prepare("insert into header(label, id_size, timestamp) values(?1, ?2, ?3)")?,
-        insert_instance: tx.prepare("insert into instance(obj_id, stack_trace_serial, class_obj_id) values(?1, ?2, ?3)")?,
-        insert_load_class: tx.prepare("insert into load_class(serial, obj_id, stack_trace_serial, name_id) values(?1, ?2, ?3, ?4)")?,
-        insert_name: tx.prepare("insert into name(name_id, text) values(?1, ?2)")?,
-        insert_obj_array: tx.prepare("insert into obj_array(obj_id, stack_trace_serial, class_obj_id, length) values(?1, ?2, ?3, ?4)")?,
-        insert_primitive_array: tx.prepare("insert into primitive_array(obj_id, stack_trace_serial, type_id, length, text) values(?1, ?2, ?3, ?4, ?5)")?,
+        insert_class: tx.prepare(
+            "insert into class(id, name_id, super_id, instance_size) values(?1, ?2, ?3, ?4)",
+        )?,
+        insert_field: tx.prepare("insert into field(class_id, name_id, ind, type_id) values(?1, ?2, ?3, ?4)")?,
+        insert_field_value: tx
+            .prepare("insert into field_value(instance_id, field_id, obj_id) values(?1, ?2, ?3)")?,
+        insert_header: tx
+            .prepare("insert into header(label, id_size, timestamp) values(?1, ?2, ?3)")?,
+        insert_instance: tx.prepare("insert into instance(id, class_id) values(?1, ?2)")?,
+        insert_name: tx.prepare("insert into name(text) values(?1)")?,
+        insert_obj_array: tx
+            .prepare("insert into obj_array(id, class_id, length) values(?1, ?2, ?3)")?,
+        insert_primitive_array: tx.prepare(
+            "insert into primitive_array(id, type_id, length, text) values(?1, ?2, ?3, ?4)",
+        )?,
     };
     let memmap = unsafe { memmap::MmapOptions::new().map(&file) }.unwrap();
     let hprof = parse_hprof(&memmap[..]).unwrap();
@@ -85,7 +96,10 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
     let mut context = Context {
         class_infos: HashMap::new(),
         id_size: header.id_size(),
+        instance_ids: HashMap::new(),
+        name_ids: HashMap::new(),
         statements,
+        tx: &tx,
     };
     // TODO Update object type size to id_size?
     // TODO Infer sizes using calculations?
@@ -103,12 +117,37 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
             RecordTag::LoadClass => {
                 class_count += 1;
                 let class = record.as_load_class().unwrap().unwrap();
-                context.statements.insert_load_class.execute(params![
-                    class.class_serial().num(),
-                    class.class_obj_id().id(),
-                    class.stack_trace_serial().num(),
-                    class.class_name_id().id(),
-                ])?;
+                let mut do_insert = false;
+                match context.class_infos.get_mut(&class.class_obj_id()) {
+                    Some(info) => {
+                        if info.name_id == 0 {
+                            info.name_id = context.name_ids[&class.class_name_id()];
+                        }
+                        do_insert = info.instance_size >= 0;
+                    }
+                    None => {
+                        context.class_infos.insert(
+                            class.class_obj_id(),
+                            ClassInfo {
+                                id: (context.class_infos.len() + 1).try_into().unwrap(),
+                                fields: vec![],
+                                field_ids: vec![],
+                                instance_size: -1,
+                                name_id: context.name_ids[&class.class_name_id()],
+                                super_id: None,
+                            },
+                        );
+                    }
+                }
+                if do_insert {
+                    let info = &context.class_infos[&class.class_obj_id()];
+                    context.statements.insert_class.execute(params![
+                        info.id,
+                        info.name_id,
+                        info.super_id.map(|sup| context.class_infos[&sup].id),
+                        info.instance_size,
+                    ])?;
+                }
             }
             RecordTag::Utf8 => {
                 name_count += 1;
@@ -116,7 +155,10 @@ fn parse_records(file: fs::File, conn: &mut Connection) -> Result<()> {
                 context
                     .statements
                     .insert_name
-                    .execute(params![name.name_id().id(), name.text()])?;
+                    .execute(params![name.text()])?;
+                context
+                    .name_ids
+                    .insert(name.name_id(), context.tx.last_insert_rowid());
             }
             _ => {}
         }
@@ -142,20 +184,27 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
                 process_instance(instance, context)?;
             }
             SubRecord::ObjectArray(array) => {
+                let id = context.instance_ids.len() + 1;
+                context
+                    .instance_ids
+                    .insert(array.obj_id(), id.try_into().unwrap());
+                let items = array.elements(context.id_size);
+                context.statements.insert_obj_array.execute(params![
+                    id,
+                    context.class_infos[&array.array_class_obj_id()].id,
+                    items.count(),
+                ])?;
                 // for thing in array.elements(id_size) {
                 //     let thing = thing.unwrap().unwrap().id();
                 // }
-                context.statements.insert_obj_array.execute(params![
-                    array.obj_id().id(),
-                    array.stack_trace_serial().num(),
-                    array.array_class_obj_id().id(),
-                    array.elements(context.id_size).count(),
-                ])?;
             }
             SubRecord::PrimitiveArray(array) => {
+                let id = context.instance_ids.len() + 1;
+                context
+                    .instance_ids
+                    .insert(array.obj_id(), id.try_into().unwrap());
                 context.statements.insert_primitive_array.execute(params![
-                    array.obj_id().id(),
-                    array.stack_trace_serial().num(),
+                    id,
                     primitive_array_type_id(array.primitive_type()),
                     primitive_array_length(&array),
                     primitive_array_text(&array)?,
@@ -168,34 +217,62 @@ fn parse_dump_records(record: &HeapDumpSegment, context: &mut Context) -> Result
 }
 
 fn process_class(class: Class, context: &mut Context) -> Result<()> {
-    let class_info = ClassInfo {
-        id: class.obj_id(),
-        super_id: class.super_class_obj_id(),
-        fields: class
-            .instance_field_descriptors()
-            .map(|field| field.unwrap())
-            .collect(),
+    let mut do_insert = false;
+    match context.class_infos.get_mut(&class.obj_id()) {
+        Some(info) => {
+            info.super_id = class.super_class_obj_id();
+            info.instance_size = class.instance_size_bytes().into();
+            do_insert = true;
+        }
+        None => {
+            context.class_infos.insert(
+                class.obj_id(),
+                ClassInfo {
+                    id: (context.class_infos.len() + 1).try_into().unwrap(),
+                    fields: vec![],
+                    field_ids: vec![],
+                    instance_size: class.instance_size_bytes().into(),
+                    name_id: -1,
+                    super_id: None,
+                },
+            );
+        }
     };
-    for (i, descriptor) in class_info.fields.iter().enumerate() {
-        context.statements.insert_field_info.execute(params![
-            class_info.id.id(),
+    if do_insert {
+        let info = &context.class_infos[&class.obj_id()];
+        context.statements.insert_class.execute(params![
+            info.id,
+            info.name_id,
+            info.super_id.map(|sup| context.class_infos[&sup].id),
+            info.instance_size,
+        ])?;
+    }
+    let info = context.class_infos.get_mut(&class.obj_id()).unwrap();
+    info.fields = class
+        .instance_field_descriptors()
+        .map(|field| field.unwrap())
+        .collect();
+    for (i, descriptor) in info.fields.iter().enumerate() {
+        context.statements.insert_field.execute(params![
+            info.id,
+            context.name_ids[&descriptor.name_id()],
             i,
-            descriptor.name_id().id(),
             field_type_id(descriptor.field_type()),
         ])?;
-        // TODO Duplicate supertype fields?
+        info.field_ids.push(context.tx.last_insert_rowid());
     }
-    context.class_infos.insert(class.obj_id(), class_info);
-    context.statements.insert_class.execute(params![
-        class.obj_id().id(),
-        class.stack_trace_serial().num(),
-        class.super_class_obj_id().map(|sup| sup.id()),
-        class.instance_size_bytes(),
-    ])?;
     Ok(())
 }
 
 fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
+    let id = context.instance_ids.len() + 1;
+    context
+        .instance_ids
+        .insert(instance.obj_id(), id.try_into().unwrap());
+    context.statements.insert_instance.execute(params![
+        id,
+        context.class_infos[&instance.class_obj_id()].id,
+    ])?;
     let mut class_info = Some(&context.class_infos[&instance.class_obj_id()]);
     let mut input = *instance.fields();
     while class_info.is_some() {
@@ -206,23 +283,17 @@ fn process_instance(instance: Instance, context: &mut Context) -> Result<()> {
                 .parse_value(input, context.id_size)
                 .unwrap();
             input = next;
-            let (float, int, obj) = field_value_tuple(value);
-            context.statements.insert_field_value.execute(params![
-                instance.obj_id().id(),
-                class.id.id(),
-                i,
-                float,
-                int,
-                obj,
-            ])?;
+            let (_float, _int, obj) = field_value_tuple(value);
+            if obj.is_some() {
+                context.statements.insert_field_value.execute(params![
+                    id,
+                    class.field_ids[i],
+                    obj.unwrap(),
+                ])?;
+            }
         }
         class_info = class.super_id.map(|id| &context.class_infos[&id]);
     }
-    context.statements.insert_instance.execute(params![
-        instance.obj_id().id(),
-        instance.stack_trace_serial().num(),
-        instance.class_obj_id().id(),
-    ])?;
     Ok(())
 }
 
@@ -281,8 +352,9 @@ fn primitive_array_length(array: &PrimitiveArray) -> usize {
 }
 
 fn primitive_array_text(array: &PrimitiveArray) -> Result<Option<String>> {
+    // TODO Byte arrays also!!!
     if array.primitive_type() != PrimitiveArrayType::Char {
-        return Ok(None)
+        return Ok(None);
     }
     let chars: Vec<u16> = array.chars().unwrap().map(|c| c.unwrap()).collect();
     Ok(Some(String::from_utf16(&chars)?))

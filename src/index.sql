@@ -1,56 +1,28 @@
 -- Indices
 
-create unique index name_name_id on name(name_id);
+create index name_text on name(text);
 
-create unique index load_class_serial on load_class(serial);
-create index load_class_obj_id_name_id on load_class(obj_id, name_id);
-create index load_class_name_id on load_class(name_id);
-create index load_class_stack_trace_serial on load_class(stack_trace_serial);
+-- Name not unique because multiple class loaders.
+create index class_name_id on class(name_id);
+create index class_super_id on class(super_id);
 
-create unique index class_obj_id on class(obj_id);
-create index class_stack_trace_serial on class(stack_trace_serial);
-create index class_super_obj_id on class(super_obj_id);
+create index field_class_id on field(class_id);
 
-create unique index field_info_class_obj_id_index
-    on field_info(class_obj_id, ind)
-;
-create unique index field_info_class_obj_id_name_id
-    on field_info(class_obj_id, name_id)
-;
+create index instance_class_id on instance(class_id);
 
-create index instance_obj_id on instance(obj_id);
-create index instance_class_obj_id on instance(class_obj_id);
-
-create unique index field_value_instance_id_class_id_ind
-    on field_value(instance_obj_id, class_obj_id, ind)
-;
-create index field_value_instance_id on field_value(instance_obj_id);
+create index field_value_instance_id on field_value(instance_id);
 create index field_value_obj_id on field_value(obj_id);
 
-create unique index type_name on type(name);
+create index obj_array_class_id on obj_array(class_id);
 
-create index obj_array_obj_id on obj_array(obj_id);
-create index obj_array_class_obj_id on obj_array(class_obj_id);
-
-create index primitive_array_obj_id on primitive_array(obj_id);
 create index primitive_array_type_id on primitive_array(type_id);
 
 -- Views
 
 create view ez_class as
-with lclass as (
-    select distinct obj_id, name_id from load_class
-)
-select
-    class.id,
-    class.obj_id,
-    class.stack_trace_serial,
-    class.instance_size,
-    name.name_id,
-    name.text name
-from class
-    inner join lclass on class.obj_id = lclass.obj_id
-    inner join name on lclass.name_id = name.name_id
+select c.id, c.instance_size, n.text name
+from class c
+join name n on c.name_id = n.id
 ;
 
 create view ez_total as
@@ -58,8 +30,8 @@ select
     count(*) count,
     sum(length) * 8 + count(*) * 24 size,
     c.name
-from obj_array a inner join ez_class c on a.class_obj_id = c.obj_id
-group by c.obj_id
+from obj_array a join ez_class c on a.class_id = c.id
+group by c.id
 union all
 select
     count(*) count,
@@ -72,6 +44,6 @@ select
     count(*) count,
     count(*) * (c.instance_size + 16) size,
     c.name
-from instance i inner join ez_class c on i.class_obj_id = c.obj_id
-group by c.obj_id
+from instance i inner join ez_class c on i.class_id = c.id
+group by c.id
 ;
