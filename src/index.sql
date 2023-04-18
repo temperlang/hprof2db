@@ -11,6 +11,7 @@ create index field_class_id on field(class_id);
 create index instance_class_id on instance(class_id);
 
 create index field_value_instance_id on field_value(instance_id);
+create index field_value_field_id on field_value(field_id);
 
 create index obj_array_class_id on obj_array(class_id);
 
