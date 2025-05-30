@@ -1,30 +1,61 @@
 import argparse
 import sqlite3
 import typing
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import closing
 
 
-class Classy(typing.TypedDict):
-    class_name: str
-    ref_class_name: typing.Optional[str]
-
-
-class Count(typing.TypedDict):
-    class_name: str
-    ref_class_name: typing.Optional[str]
-    count: int
-
-
-class Ref(typing.TypedDict):
+class Chain(typing.TypedDict):
     class_name: str
     instance_id: int
-    array_len: typing.Optional[int]
-    ref_class_name: typing.Optional[str]
+    ref: typing.Optional["Chain"]
 
 
-def class_pair(instance: Classy) -> tuple[str, typing.Optional[str]]:
-    return (instance["class_name"], instance["ref_class_name"])
+class ChainCount(typing.TypedDict):
+    class_names: tuple[str, ...]
+    count: int
+    target_count: int
+    bad: bool
+
+
+class ChainRaw(typing.TypedDict):
+    class_name: bytes
+    instance_id: int
+    ref_id: int
+
+
+class ChainTarget(typing.TypedDict):
+    class_names: tuple[str, ...]
+    instance_id: int
+
+
+def chain_instances(chain: Chain) -> tuple[int, ...]:
+    instances = []
+    maybe: typing.Optional[Chain] = chain
+    while maybe is not None:
+        instances.append(maybe["instance_id"])
+        maybe = maybe["ref"]
+    return tuple(instances)
+
+
+def class_chain(chain: Chain) -> tuple[str, ...]:
+    class_names = []
+    maybe: typing.Optional[Chain] = chain
+    while maybe is not None:
+        class_names.append(maybe["class_name"])
+        maybe = maybe["ref"]
+    return tuple(class_names)
+
+
+def class_chain_target(chain: Chain) -> ChainTarget:
+    class_names: list[str] = []
+    maybe: typing.Optional[Chain] = chain
+    last = chain
+    while maybe is not None:
+        last = maybe
+        class_names.append(maybe["class_name"])
+        maybe = maybe["ref"]
+    return ChainTarget(class_names=tuple(class_names), instance_id=last["instance_id"])
 
 
 def dict_factory(cursor: sqlite3.Cursor, row):
@@ -32,11 +63,11 @@ def dict_factory(cursor: sqlite3.Cursor, row):
     return {key: value for key, value in zip(fields, row)}
 
 
-def get_refs_array(*, cursor: sqlite3.Cursor, instances: list[Ref]) -> list[Ref]:
+def get_refs_array(*, cursor: sqlite3.Cursor, instances: list[Chain]) -> list[ChainRaw]:
     params = ",".join("?" * len(instances))
     cursor.execute(
         f"""
-        select n.text class_name, oa.id instance_id, oa.length array_len, oai.obj_id ref_id
+        select n.text class_name, oa.id instance_id, oai.obj_id ref_id
         from obj_array_item oai
         join obj_array oa on oa.id = oai.array_id
         join class c on c.id = oa.class_id
@@ -46,18 +77,11 @@ def get_refs_array(*, cursor: sqlite3.Cursor, instances: list[Ref]) -> list[Ref]
         """,
         tuple(instance["instance_id"] for instance in instances),
     )
-    back_refs = {
-        instance["instance_id"]: instance["class_name"] for instance in instances
-    }
-    results = cursor.fetchall()
-    for result in results:
-        result["class_name"] = result["class_name"].decode("utf-8")
-        result["ref_class_name"] = back_refs[result.pop("ref_id")]
-    return results
+    return cursor.fetchall()
 
 
-def get_refs_field(*, cursor: sqlite3.Cursor, instances: list[Ref]) -> list[Ref]:
-    params = ",".join("?" * len(instances))
+def get_refs_field(*, cursor: sqlite3.Cursor, chains: list[Chain]) -> list[ChainRaw]:
+    params = ",".join("?" * len(chains))
     cursor.execute(
         f"""
         select n.text class_name, i.id instance_id, fv.obj_id ref_id
@@ -68,26 +92,39 @@ def get_refs_field(*, cursor: sqlite3.Cursor, instances: list[Ref]) -> list[Ref]
         where fv.obj_id in ({params})
         group by n.text, i.id, fv.obj_id
         """,
-        tuple(instance["instance_id"] for instance in instances),
+        tuple(chain["instance_id"] for chain in chains),
     )
-    back_refs = {
-        instance["instance_id"]: instance["class_name"] for instance in instances
-    }
-    results = cursor.fetchall()
+    return cursor.fetchall()
+
+
+def get_refs(
+    *, cursor: sqlite3.Cursor, chains: list[Chain], instance_ids: set[int]
+) -> list[Chain]:
+    refs_array = get_refs_array(cursor=cursor, instances=chains)
+    refs_field = get_refs_field(cursor=cursor, chains=chains)
+    refs = refs_array + refs_field
+    back_refs = {chain["instance_id"]: chain for chain in chains}
+    results = [
+        Chain(
+            class_name=ref["class_name"].decode(),
+            instance_id=ref["instance_id"],
+            ref=back_refs[ref["ref_id"]],
+        )
+        for ref in refs
+        # Keep only new instances.
+        # TODO Except chains can still be interesting.
+        # TODO How to prune boring chains?
+        # if ref["instance_id"] not in instance_ids
+        if ref["instance_id"] not in chain_instances(back_refs[ref["ref_id"]])
+    ]
     for result in results:
-        result["class_name"] = result["class_name"].decode("utf-8")
-        result["array_len"] = None
-        result["ref_class_name"] = back_refs[result.pop("ref_id")]
+        instance_ids.add(result["instance_id"])
     return results
 
 
-def get_refs(*, cursor: sqlite3.Cursor, instances: list[Ref]) -> list[Ref]:
-    refs_array = get_refs_array(cursor=cursor, instances=instances)
-    refs_field = get_refs_field(cursor=cursor, instances=instances)
-    return refs_array + refs_field
-
-
-def get_starters(*, cursor: sqlite3.Cursor, class_name: str) -> list[Ref]:
+def get_starters(
+    *, cursor: sqlite3.Cursor, class_name: str, instance_ids: set[int]
+) -> list[Chain]:
     cursor.execute(
         """
         select n.text class_name, i.id instance_id
@@ -102,8 +139,8 @@ def get_starters(*, cursor: sqlite3.Cursor, class_name: str) -> list[Ref]:
     results = cursor.fetchall()
     for result in results:
         result["class_name"] = result["class_name"].decode("utf-8")
-        result["array_len"] = None
-        result["ref_class_name"] = None
+        result["ref"] = None
+        instance_ids.add(result["instance_id"])
     return results
 
 
@@ -152,39 +189,54 @@ def get_starters(*, cursor: sqlite3.Cursor, class_name: str) -> list[Ref]:
 #     return paths
 
 
-def report(*, depth: int, instances: list[Ref], limit: int) -> list[Count]:
-    counter = Counter([class_pair(instance) for instance in instances])
-    print(f"depth: {depth}, rows: {len(counter)}, instances: {len(instances)}")
+def report(
+    *, depth: int, chains: list[Chain], target_min: int, total_max: int
+) -> list[ChainCount]:
+    chain_targets: defaultdict[tuple[str, ...], set[int]] = defaultdict(set)
+    for chain in chains:
+        chain_target = class_chain_target(chain)
+        chain_targets[chain_target["class_names"]].add(chain_target["instance_id"])
+    counter = Counter([class_chain(instance) for instance in chains])
+    print(f"depth: {depth}, rows: {len(counter)}, instances: {len(chains)}")
     items = [
-        Count(class_name=pair[0], ref_class_name=pair[1], count=count)
-        for pair, count in counter.items()
-    ]
-    items.sort(key=lambda item: item["count"], reverse=True)
-    for item in items:
-        note = " *" if item["count"] >= limit else ""
-        print(
-            f"{item['class_name']} -> {item['ref_class_name']}: {item['count']}{note}"
+        ChainCount(
+            class_names=item[0],
+            count=item[1],
+            target_count=len(chain_targets[item[0]]),
+            bad=False,
         )
+        for item in counter.items()
+    ]
+    items.sort(key=lambda item: item["target_count"], reverse=True)
+    for item in items:
+        if item["target_count"] < target_min or item["count"] > total_max:
+            item["bad"] = True
+        note = " *" if item["bad"] else ""
+        print(f"{item['class_names']}: {item['count']} vs {item['target_count']}{note}")
     print()
     return items
 
 
 def run(*, db: str, depth_max: int, class_name: str):
-    limit = 1000
+    instance_ids: set[int] = set()
+    target_min = 20
+    total_max = 1000
     with closing(sqlite3.connect(db)) as conn:
         conn.row_factory = dict_factory
         cursor = conn.cursor()
-        instances = get_starters(cursor=cursor, class_name=class_name)
+        chains = get_starters(
+            cursor=cursor, class_name=class_name, instance_ids=instance_ids
+        )
         depth = 0
         while True:
-            counts = report(depth=depth, instances=instances, limit=limit)
+            counts = report(depth=depth, chains=chains, target_min=target_min, total_max=total_max)
             if depth >= depth_max:
                 break
-            bigs = set(class_pair(count) for count in counts if count["count"] >= limit)
-            instances = [
-                instance for instance in instances if class_pair(instance) not in bigs
+            bigs = set(count["class_names"] for count in counts if count["bad"])
+            chains = [
+                instance for instance in chains if class_chain(instance) not in bigs
             ]
-            instances = get_refs(cursor=cursor, instances=instances)
+            chains = get_refs(cursor=cursor, chains=chains, instance_ids=instance_ids)
             depth += 1
 
 
