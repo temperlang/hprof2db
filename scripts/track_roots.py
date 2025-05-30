@@ -122,6 +122,20 @@ def get_refs(
     return results
 
 
+def get_roots(cursor: sqlite3.Cursor) -> set[int]:
+    cursor.execute(
+        """
+        select id from instance
+        where id not in (
+            select obj_id from field_value where obj_id is not null
+            union
+            select obj_id from obj_array_item where obj_id is not null
+        )
+        """
+    )
+    return set(row["id"] for row in cursor.fetchall())
+
+
 def get_starters(
     *, cursor: sqlite3.Cursor, class_name: str, instance_ids: set[int]
 ) -> list[Chain]:
@@ -142,20 +156,6 @@ def get_starters(
         result["ref"] = None
         instance_ids.add(result["instance_id"])
     return results
-
-
-# def get_roots(cursor):
-#     cursor.execute(
-#         """
-#         select id from instance
-#         where id not in (
-#             select obj_id from field_value where obj_id is not null
-#             union
-#             select obj_id from obj_array_item where obj_id is not null
-#         )
-#         """
-#     )
-#     return [row[0] for row in cursor.fetchall()]
 
 
 # def build_reverse_refs(cursor):
@@ -224,11 +224,18 @@ def run(*, db: str, depth_max: int, class_name: str):
     with closing(sqlite3.connect(db)) as conn:
         conn.row_factory = dict_factory
         cursor = conn.cursor()
+        roots = get_roots(cursor=cursor)
+        print(f"Total roots: {len(roots)}")
+        print()
         chains = get_starters(
             cursor=cursor, class_name=class_name, instance_ids=instance_ids
         )
         depth = 0
         while True:
+            roots_found = instance_ids & roots
+            if roots_found:
+                print(f"Roots found!!! -> {len(roots_found)}")
+            print(f"Total instances: {len(instance_ids)}")
             counts = report(depth=depth, chains=chains, target_min=target_min, total_max=total_max)
             if depth >= depth_max:
                 break
