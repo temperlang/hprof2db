@@ -211,6 +211,8 @@ def report(
     for item in items:
         if item["target_count"] < target_min or item["count"] > total_max:
             item["bad"] = True
+        if item["target_count"] < target_min:
+            continue
         note = " *" if item["bad"] else ""
         print(f"{item['class_names']}: {item['count']} vs {item['target_count']}{note}")
     print()
